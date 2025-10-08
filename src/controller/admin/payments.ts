@@ -105,6 +105,7 @@ export const updatePayment = async (req: Request, res: Response) => {
   let monthsToAdd = 0;
   const subscriptionType = payment.subscriptionType || "quarterly"; // افتراضي quarterly إذا مش محدد
   switch(subscriptionType) {
+    case "monthly": monthsToAdd = 1; break;
     case "quarterly": monthsToAdd = 3; break;
     case "semi_annually": monthsToAdd = 6; break;
     case "annually": monthsToAdd = 12; break;

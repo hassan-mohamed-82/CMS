@@ -17,7 +17,7 @@ router.post(
   uploadTemplate.fields([
     { name: "template_file_path", maxCount: 1 },
     { name: "photo", maxCount: 1 },
-    { name: "overphoto", maxCount: 1 }, // ← جديد
+    // { name: "overphoto", maxCount: 1 }, // ← جديد
   ]),
   catchAsync(createTemplate)
 );
@@ -34,7 +34,7 @@ router.put(
   uploadTemplate.fields([
     { name: "template_file_path", maxCount: 1 },
     { name: "photo", maxCount: 1 },
-    { name: "overphoto", maxCount: 1 }, // ← جديد
+    // { name: "overphoto", maxCount: 1 }, // ← جديد
   ]),
   catchAsync(updateTemplate)
 );

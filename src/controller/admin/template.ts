@@ -23,8 +23,9 @@ export const createTemplate = async (req: Request, res: Response) => {
   if (
     !files ||
     !files["template_file_path"] ||
-    !files["photo"] ||
-    !files["overphoto"]
+    !files["photo"] 
+    // ||
+    // !files["overphoto"]
   ) {
     throw new BadRequest("All files (template, photo, overphoto) are required");
   }
@@ -35,14 +36,14 @@ export const createTemplate = async (req: Request, res: Response) => {
 
   const templateFile = files["template_file_path"][0];
   const photoFile = files["photo"][0];
-  const overphotoFile = files["overphoto"][0];
+  // const overphotoFile = files["overphoto"][0];
 
   const newTemplate = await TemplateModel.create({
     name,
     activityId,
     template_file_path: buildLink(templateFile, "templates"),
     photo: buildLink(photoFile, "templates"),
-    overphoto: buildLink(overphotoFile, "templates"),
+    // overphoto: buildLink(overphotoFile, "templates"),
   });
 
   SuccessResponse(res, {

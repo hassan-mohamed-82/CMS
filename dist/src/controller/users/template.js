@@ -4,11 +4,8 @@ exports.getTemplateById = exports.getAllTemplates = void 0;
 const templates_1 = require("../../models/shema/templates");
 const BadRequest_1 = require("../../Errors/BadRequest");
 const NotFound_1 = require("../../Errors/NotFound");
-const unauthorizedError_1 = require("../../Errors/unauthorizedError");
 const response_1 = require("../../utils/response");
 const getAllTemplates = async (req, res) => {
-    if (!req.user)
-        throw new unauthorizedError_1.UnauthorizedError("user not authenticated");
     const template = await templates_1.TemplateModel.find().populate('activityId', 'name isActive');
     if (!template)
         throw new NotFound_1.NotFound("Template not found");
@@ -16,8 +13,6 @@ const getAllTemplates = async (req, res) => {
 };
 exports.getAllTemplates = getAllTemplates;
 const getTemplateById = async (req, res) => {
-    if (!req.user)
-        throw new unauthorizedError_1.UnauthorizedError("user not authenticated");
     const { id } = req.params;
     if (!id)
         throw new BadRequest_1.BadRequest("ID is required");
