@@ -1,88 +1,175 @@
-import { Request, Response } from 'express';
-import { UserModel } from '../../models/shema/auth/User';
-import { BadRequest } from '../../Errors/BadRequest';
-import { NotFound } from '../../Errors/NotFound';
-import { UnauthorizedError } from '../../Errors/unauthorizedError';
-import { SuccessResponse } from '../../utils/response';
-import bcrypt from 'bcrypt';
+import { Request, Response } from "express";
+import { db } from "../../models/connection";
+import { users } from "../../models/schema/auth/User";
+import { plans } from "../../models/schema/plans";
+import { eq } from "drizzle-orm";
+import { BadRequest } from "../../Errors/BadRequest";
+import { NotFound } from "../../Errors/NotFound";
+import { UnauthorizedError } from "../../Errors/unauthorizedError";
+import { SuccessResponse } from "../../utils/response";
+import bcrypt from "bcrypt";
+
 export const createUser = async (req: Request, res: Response) => {
- if(!req.user|| req.user.role !== 'admin') throw new UnauthorizedError("Access denied");
-   const { name, email, password, phonenumber } = req.body;
+  if (!req.user || req.user.role !== "admin")
+    throw new UnauthorizedError("Access denied");
 
-    if (!password) {
-      throw new BadRequest('Password is required');
-    }
+  const { name, email, password, phonenumber } = req.body;
 
-    // 🟢 تشفير الباسورد
-    const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password, salt);
+  if (!password) {
+    throw new BadRequest("Password is required");
+  }
 
-    const user = new UserModel({
+  const salt = await bcrypt.genSalt(10);
+  const hashedPassword = await bcrypt.hash(password, salt);
+
+  const [result] = await db
+    .insert(users)
+    .values({
       name,
       email,
       password: hashedPassword,
       phonenumber,
-    });
+    })
+    .$returningId();
 
-    await user.save();
+  const [user] = await db.select().from(users).where(eq(users.id, result.id));
 
-    SuccessResponse(res, { message: 'User created successfully', user: {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-      },  });
-}
+  SuccessResponse(res, {
+    message: "User created successfully",
+    user: {
+      id: user.id,
+      name: user.name,
+      email: user.email,
+    },
+  });
+};
 
 export const getUserById = async (req: Request, res: Response) => {
-  if (!req.user || req.user.role !== 'admin') {
-    throw new UnauthorizedError('Access denied');
+  if (!req.user || req.user.role !== "admin") {
+    throw new UnauthorizedError("Access denied");
   }
-    const { id } = req.params;
-  const user = await UserModel.findById(id).select('-password').populate('planId',"name");
-  if (!user) {
-    throw new NotFound('User not found');
+
+  const { id } = req.params;
+
+  const [result] = await db
+    .select({
+      user: {
+        id: users.id,
+        name: users.name,
+        email: users.email,
+        phonenumber: users.phonenumber,
+        isVerified: users.isVerified,
+        googleId: users.googleId,
+        planId: users.planId,
+        firstTimeBuyer: users.firstTimeBuyer,
+        createdAt: users.createdAt,
+        updatedAt: users.updatedAt,
+      },
+      plan: {
+        id: plans.id,
+        name: plans.name,
+      },
+    })
+    .from(users)
+    .leftJoin(plans, eq(users.planId, plans.id))
+    .where(eq(users.id, Number(id)));
+
+  if (!result) {
+    throw new NotFound("User not found");
   }
-  SuccessResponse(res, { message: 'User details', user });
+
+  const user = {
+    ...result.user,
+    planId: result.plan,
+  };
+
+  SuccessResponse(res, { message: "User details", user });
 };
 
 export const updateUser = async (req: Request, res: Response) => {
-  if (!req.user || req.user.role !== 'admin') {
-    throw new UnauthorizedError('Access denied');
+  if (!req.user || req.user.role !== "admin") {
+    throw new UnauthorizedError("Access denied");
   }
+
   const { id } = req.params;
   const { name, email, password, phonenumber } = req.body;
-  const user = await UserModel.findById(id);
-  if (!user) {
-    throw new NotFound('User not found');
+
+  const [existingUser] = await db
+    .select()
+    .from(users)
+    .where(eq(users.id, Number(id)));
+
+  if (!existingUser) {
+    throw new NotFound("User not found");
   }
+
+  const updateData: Partial<typeof users.$inferInsert> = {};
+  if (name) updateData.name = name;
+  if (email) updateData.email = email;
+  if (phonenumber) updateData.phonenumber = phonenumber;
+
   if (password) {
     const salt = await bcrypt.genSalt(10);
-    const hashedPassword = await bcrypt.hash(password, salt);
-    user.password = hashedPassword;
+    updateData.password = await bcrypt.hash(password, salt);
   }
-  user.name = name;
-  user.email = email;
-  user.phonenumber = phonenumber;
-  await user.save();
-  SuccessResponse(res, { message: 'User updated successfully'})
+
+  await db.update(users).set(updateData).where(eq(users.id, Number(id)));
+
+  SuccessResponse(res, { message: "User updated successfully" });
 };
 
 export const deleteUser = async (req: Request, res: Response) => {
-  if (!req.user || req.user.role !== 'admin') {
-    throw new UnauthorizedError('Access denied');
+  if (!req.user || req.user.role !== "admin") {
+    throw new UnauthorizedError("Access denied");
   }
+
   const { id } = req.params;
-  const user = await UserModel.findByIdAndDelete(id);
+
+  const [user] = await db
+    .select()
+    .from(users)
+    .where(eq(users.id, Number(id)));
+
   if (!user) {
-    throw new NotFound('User not found');
+    throw new NotFound("User not found");
   }
-  SuccessResponse(res, { message: 'User deleted successfully' });
+
+  await db.delete(users).where(eq(users.id, Number(id)));
+
+  SuccessResponse(res, { message: "User deleted successfully" });
 };
 
 export const getAllUsers = async (req: Request, res: Response) => {
-  if (!req.user || req.user.role !== 'admin') {
-    throw new UnauthorizedError('Access denied');
+  if (!req.user || req.user.role !== "admin") {
+    throw new UnauthorizedError("Access denied");
   }
-  const users = await UserModel.find().select('-password').populate('planId',"name");
-  SuccessResponse(res, { message: 'Users fetched successfully', users });
+
+  const allUsers = await db
+    .select({
+      user: {
+        id: users.id,
+        name: users.name,
+        email: users.email,
+        phonenumber: users.phonenumber,
+        isVerified: users.isVerified,
+        googleId: users.googleId,
+        planId: users.planId,
+        firstTimeBuyer: users.firstTimeBuyer,
+        createdAt: users.createdAt,
+        updatedAt: users.updatedAt,
+      },
+      plan: {
+        id: plans.id,
+        name: plans.name,
+      },
+    })
+    .from(users)
+    .leftJoin(plans, eq(users.planId, plans.id));
+
+  const formattedUsers = allUsers.map((item) => ({
+    ...item.user,
+    planId: item.plan,
+  }));
+
+  SuccessResponse(res, { message: "Users fetched successfully", users: formattedUsers });
 };

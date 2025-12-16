@@ -1,16 +1,16 @@
-
-import mongoose from "mongoose";
 import { Request, Response } from "express";
-import { PlanModel } from "../../models/shema/plans";
-import { PaymentModel } from "../../models/shema/payments";
-import { PromoCodeModel } from "../../models/shema/promo_code";
-import { PromoCodePlanModel } from "../../models/shema/promocode_plans";
-import { PromoCodeUserModel } from "../../models/shema/promocode_users";
+import { db } from "../../models/connection";
+import { plans } from "../../models/schema/plans";
+import { payments } from "../../models/schema/payments";
+import { paymentMethods } from "../../models/schema/payment_methods";
+import { promoCodes } from "../../models/schema/promo_code";
+import { promocodePlans } from "../../models/schema/promocode_plans";
+import { promocodeUsers } from "../../models/schema/promocode_users";
+import { eq, and, lte, gte } from "drizzle-orm";
 import { BadRequest } from "../../Errors/BadRequest";
 import { NotFound } from "../../Errors/NotFound";
 import { UnauthorizedError } from "../../Errors/unauthorizedError";
 import { SuccessResponse } from "../../utils/response";
-
 
 export const createPayment = async (req: Request, res: Response) => {
   if (!req.user) throw new UnauthorizedError("User is not authenticated");
@@ -22,10 +22,14 @@ export const createPayment = async (req: Request, res: Response) => {
     throw new BadRequest("Please provide all the required fields");
   }
 
-  if (!mongoose.Types.ObjectId.isValid(plan_id)) throw new BadRequest("Invalid plan ID");
-  if (!mongoose.Types.ObjectId.isValid(paymentmethod_id)) throw new BadRequest("Invalid payment method ID");
+  const planId = Number(plan_id);
+  const paymentMethodId = Number(paymentmethod_id);
 
-  const plan = await PlanModel.findById(plan_id);
+  if (isNaN(planId)) throw new BadRequest("Invalid plan ID");
+  if (isNaN(paymentMethodId)) throw new BadRequest("Invalid payment method ID");
+
+  const [plan] = await db.select().from(plans).where(eq(plans.id, planId));
+
   if (!plan) throw new NotFound("Plan not found");
 
   const parsedAmount = Number(amount);
@@ -33,70 +37,123 @@ export const createPayment = async (req: Request, res: Response) => {
     throw new BadRequest("Amount must be a positive number");
   }
 
-  const validAmounts = [plan.price_monthly, plan.price_quarterly, plan.price_semi_annually, plan.price_annually]
-    .filter(price => price != null);
+  const validAmounts = [
+    plan.priceMonthly ? Number(plan.priceMonthly) : null,
+    plan.priceQuarterly ? Number(plan.priceQuarterly) : null,
+    plan.priceSemiAnnually ? Number(plan.priceSemiAnnually) : null,
+    plan.priceAnnually ? Number(plan.priceAnnually) : null,
+  ].filter((price) => price != null);
 
   if (!validAmounts.includes(parsedAmount)) {
     throw new BadRequest("Invalid payment amount for this plan");
   }
 
-  // حساب الخصم لو فيه كود
+  // Calculate discount if code exists
   let discountAmount = 0;
   if (code) {
     const today = new Date();
-    const promo = await PromoCodeModel.findOne({
-      code,
-      isActive: true,
-      start_date: { $lte: today },
-      end_date: { $gte: today },
-    });
+    const [promo] = await db
+      .select()
+      .from(promoCodes)
+      .where(
+        and(
+          eq(promoCodes.code, code),
+          eq(promoCodes.isActive, true),
+          lte(promoCodes.startDate, today),
+          gte(promoCodes.endDate, today)
+        )
+      );
 
     if (!promo) throw new BadRequest("Invalid or expired promo code");
 
-    const alreadyUsed = await PromoCodeUserModel.findOne({ userId, codeId: promo._id });
+    const [alreadyUsed] = await db
+      .select()
+      .from(promocodeUsers)
+      .where(
+        and(
+          eq(promocodeUsers.userId, Number(userId)),
+          eq(promocodeUsers.codeId, promo.id)
+        )
+      );
+
     if (alreadyUsed) throw new BadRequest("You have already used this promo code");
 
     type SubscriptionType = "monthly" | "quarterly" | "semi_annually" | "yearly";
-    const validSubscriptionTypes: SubscriptionType[] = ["monthly", "quarterly", "semi_annually", "yearly"];
+    const validSubscriptionTypes: SubscriptionType[] = [
+      "monthly",
+      "quarterly",
+      "semi_annually",
+      "yearly",
+    ];
     if (!validSubscriptionTypes.includes(subscriptionType)) {
       throw new BadRequest("Invalid subscription type");
     }
 
-    const promoPlan = await PromoCodePlanModel.findOne({ codeId: promo._id, planId: plan._id });
+    const [promoPlan] = await db
+      .select()
+      .from(promocodePlans)
+      .where(
+        and(
+          eq(promocodePlans.codeId, promo.id),
+          eq(promocodePlans.planId, plan.id)
+        )
+      );
+
     if (!promoPlan) throw new BadRequest("Promo code does not apply to this plan");
 
-    const appliesToKey = `applies_to_${subscriptionType}` as keyof typeof promoPlan;
-    if (!promoPlan[appliesToKey]) throw new BadRequest("Promo code does not apply to this plan/subscription type");
+    // Check if promo applies to subscription type
+    const appliesToMap: Record<SubscriptionType, boolean | null> = {
+      monthly: promoPlan.appliesToMonthly,
+      quarterly: promoPlan.appliesToQuarterly,
+      semi_annually: promoPlan.appliesToSemiAnnually,
+      yearly: promoPlan.appliesToYearly,
+    };
 
-    if (promo.discount_type === "percentage") {
-      discountAmount = (amount * promo.discount_value) / 100;
-    } else {
-      discountAmount = promo.discount_value;
+    if (!appliesToMap[subscriptionType as SubscriptionType]) {
+      throw new BadRequest("Promo code does not apply to this plan/subscription type");
     }
 
-    await PromoCodeUserModel.create({ userId, codeId: promo._id });
+    if (promo.discountType === "percentage") {
+      discountAmount = (parsedAmount * Number(promo.discountValue)) / 100;
+    } else {
+      discountAmount = Number(promo.discountValue);
+    }
+
+    await db.insert(promocodeUsers).values({
+      userId: Number(userId),
+      codeId: promo.id,
+    });
   }
 
-  const finalAmount = amount - discountAmount;
-  if (finalAmount <= 0) throw new BadRequest("Invalid payment amount after applying promo code");
+  const finalAmount = parsedAmount - discountAmount;
+  if (finalAmount <= 0)
+    throw new BadRequest("Invalid payment amount after applying promo code");
 
-  // بناء رابط كامل للصورة لو مرفوعة
+  // Build photo URL if uploaded
   let photoUrl: string | undefined;
   if (req.file) {
     photoUrl = `${req.protocol}://${req.get("host")}/uploads/payments/${req.file.filename}`;
   }
 
-  const payment = await PaymentModel.create({
-    amount: finalAmount,
-    paymentmethod_id,
-    plan_id,
-    payment_date: new Date(),
-    userId,
-    status: "pending",
-    code,
-    photo: photoUrl, // رابط كامل للصورة
-    subscriptionType,
-  });
+  const [result] = await db
+    .insert(payments)
+    .values({
+      amount: String(finalAmount),
+      paymentMethodId,
+      planId,
+      paymentDate: new Date(),
+      userId: Number(userId),
+      status: "pending",
+      code,
+      photo: photoUrl || "",
+      subscriptionType,
+    })
+    .$returningId();
+
+  const [payment] = await db
+    .select()
+    .from(payments)
+    .where(eq(payments.id, result.id));
 
   SuccessResponse(res, {
     message: "Payment created successfully. Promo code applied (if valid).",
@@ -104,15 +161,31 @@ export const createPayment = async (req: Request, res: Response) => {
     discountAmount,
   });
 };
+
 export const getAllPayments = async (req: Request, res: Response) => {
   if (!req.user) throw new UnauthorizedError("user is not authenticated");
 
-  const payments = await PaymentModel.find({ userId: req.user.id })
-    .populate("paymentmethod_id")
-    .populate("plan_id");    
+  const allPayments = await db
+    .select({
+      payment: payments,
+      plan: plans,
+      paymentMethod: paymentMethods,
+    })
+    .from(payments)
+    .leftJoin(plans, eq(payments.planId, plans.id))
+    .leftJoin(paymentMethods, eq(payments.paymentMethodId, paymentMethods.id))
+    .where(eq(payments.userId, Number(req.user.id)));
 
-  const pending = payments.filter(p => p.status === "pending");
-  const history = payments.filter(p => ["approved", "rejected"].includes(p.status));
+  const formattedPayments = allPayments.map((p) => ({
+    ...p.payment,
+    paymentmethod_id: p.paymentMethod,
+    plan_id: p.plan,
+  }));
+
+  const pending = formattedPayments.filter((p) => p.status === "pending");
+  const history = formattedPayments.filter((p) =>
+    ["approved", "rejected"].includes(p.status || "")
+  );
 
   SuccessResponse(res, {
     message: "All payments fetched successfully",
@@ -125,16 +198,32 @@ export const getAllPayments = async (req: Request, res: Response) => {
 
 export const getPaymentById = async (req: Request, res: Response) => {
   if (!req.user) throw new UnauthorizedError("user is not authenticated");
+
   const userId = req.user.id;
   const { id } = req.params;
 
   if (!id) throw new BadRequest("Please provide payment id");
 
-  const payment = await PaymentModel.findOne({ _id: id, userId })
-    .populate("paymentmethod_id")
-    .populate("plan_id"); // ✅ جبت تفاصيل البلان برضه
+  const [result] = await db
+    .select({
+      payment: payments,
+      plan: plans,
+      paymentMethod: paymentMethods,
+    })
+    .from(payments)
+    .leftJoin(plans, eq(payments.planId, plans.id))
+    .leftJoin(paymentMethods, eq(payments.paymentMethodId, paymentMethods.id))
+    .where(
+      and(eq(payments.id, Number(id)), eq(payments.userId, Number(userId)))
+    );
 
-  if (!payment) throw new NotFound("Payment not found");
+  if (!result) throw new NotFound("Payment not found");
+
+  const payment = {
+    ...result.payment,
+    paymentmethod_id: result.paymentMethod,
+    plan_id: result.plan,
+  };
 
   SuccessResponse(res, { message: "Payment fetched successfully", payment });
 };

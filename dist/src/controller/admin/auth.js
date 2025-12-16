@@ -4,7 +4,9 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.login = void 0;
-const Admin_1 = require("../../models/shema/auth/Admin");
+const connection_1 = require("../../models/connection");
+const Admin_1 = require("../../models/schema/auth/Admin");
+const drizzle_orm_1 = require("drizzle-orm");
 const bcrypt_1 = __importDefault(require("bcrypt"));
 const Errors_1 = require("../../Errors");
 const response_1 = require("../../utils/response");
@@ -14,7 +16,11 @@ const login = async (req, res) => {
     if (!email || !password) {
         throw new Errors_1.UnauthorizedError("Email and password are required");
     }
-    const admin = await Admin_1.AdminModel.findOne({ email });
+    const [admin] = await connection_1.db
+        .select()
+        .from(Admin_1.admins)
+        .where((0, drizzle_orm_1.eq)(Admin_1.admins.email, email))
+        .limit(1);
     if (!admin) {
         throw new Errors_1.UnauthorizedError("Invalid email or password");
     }

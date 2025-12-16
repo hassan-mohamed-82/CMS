@@ -1,25 +1,49 @@
-import { Request, Response } from 'express';
-import { PaymentMethodModel } from '../../models/shema/payment_methods';
-import { BadRequest } from '../../Errors/BadRequest';
-import { NotFound } from '../../Errors/NotFound';
-import { UnauthorizedError } from '../../Errors/unauthorizedError';
-import { SuccessResponse } from '../../utils/response';
-import { SubscriptionModel } from '../../models/shema/subscriptions';
-import { PaymentModel } from '../../models/shema/payments';
-import { UserModel } from '../../models/shema/auth/User';
-import { PromoCodeModel } from '../../models/shema/promo_code';
-import { PromoCodeUserModel } from '../../models/shema/promocode_users';
+import { Request, Response } from "express";
+import { db } from "../../models/connection";
+import { payments } from "../../models/schema/payments";
+import { users } from "../../models/schema/auth/User";
+import { plans } from "../../models/schema/plans";
+import { paymentMethods } from "../../models/schema/payment_methods";
+import { subscriptions } from "../../models/schema/subscriptions";
+import { promoCodes } from "../../models/schema/promo_code";
+import { promocodeUsers } from "../../models/schema/promocode_users";
+import { eq, and, lte, gte, gt, desc } from "drizzle-orm";
+import { BadRequest } from "../../Errors/BadRequest";
+import { NotFound } from "../../Errors/NotFound";
+import { UnauthorizedError } from "../../Errors/unauthorizedError";
+import { SuccessResponse } from "../../utils/response";
 
 export const getAllPaymentsAdmin = async (req: Request, res: Response) => {
-  if (!req.user || req.user.role !== "admin") throw new UnauthorizedError("Access denied");
+  if (!req.user || req.user.role !== "admin")
+    throw new UnauthorizedError("Access denied");
 
-  const payments = await PaymentModel.find()
-    .populate("userId", "name email") // هات اسم و ايميل اليوزر بس
-    .populate("plan_id") // هات تفاصيل البلان
-    .populate("paymentmethod_id"); // هات تفاصيل الميثود
+  const allPayments = await db
+    .select({
+      payment: payments,
+      user: {
+        id: users.id,
+        name: users.name,
+        email: users.email,
+      },
+      plan: plans,
+      paymentMethod: paymentMethods,
+    })
+    .from(payments)
+    .leftJoin(users, eq(payments.userId, users.id))
+    .leftJoin(plans, eq(payments.planId, plans.id))
+    .leftJoin(paymentMethods, eq(payments.paymentMethodId, paymentMethods.id));
 
-  const pending = payments.filter(p => p.status === "pending");
-  const history = payments.filter(p => ["approved", "rejected"].includes(p.status));
+  const formattedPayments = allPayments.map((p) => ({
+    ...p.payment,
+    userId: p.user,
+    plan_id: p.plan,
+    paymentmethod_id: p.paymentMethod,
+  }));
+
+  const pending = formattedPayments.filter((p) => p.status === "pending");
+  const history = formattedPayments.filter((p) =>
+    ["approved", "rejected"].includes(p.status || "")
+  );
 
   SuccessResponse(res, {
     message: "All payments fetched successfully (admin)",
@@ -31,25 +55,47 @@ export const getAllPaymentsAdmin = async (req: Request, res: Response) => {
 };
 
 export const getPaymentByIdAdmin = async (req: Request, res: Response) => {
-  if (!req.user || req.user.role !== "admin") throw new UnauthorizedError("Access denied");
+  if (!req.user || req.user.role !== "admin")
+    throw new UnauthorizedError("Access denied");
 
   const { id } = req.params;
   if (!id) throw new BadRequest("Please provide payment id");
 
-  const payment = await PaymentModel.findById(id)
-    .populate("userId", "name email")
-    .populate("plan_id")
-    .populate("paymentmethod_id");
+  const [result] = await db
+    .select({
+      payment: payments,
+      user: {
+        id: users.id,
+        name: users.name,
+        email: users.email,
+      },
+      plan: plans,
+      paymentMethod: paymentMethods,
+    })
+    .from(payments)
+    .leftJoin(users, eq(payments.userId, users.id))
+    .leftJoin(plans, eq(payments.planId, plans.id))
+    .leftJoin(paymentMethods, eq(payments.paymentMethodId, paymentMethods.id))
+    .where(eq(payments.id, Number(id)));
 
-  if (!payment) throw new NotFound("Payment not found");
+  if (!result) throw new NotFound("Payment not found");
 
-  SuccessResponse(res, { message: "Payment fetched successfully (admin)", payment });
+  const payment = {
+    ...result.payment,
+    userId: result.user,
+    plan_id: result.plan,
+    paymentmethod_id: result.paymentMethod,
+  };
+
+  SuccessResponse(res, {
+    message: "Payment fetched successfully (admin)",
+    payment,
+  });
 };
 
-
-
 export const updatePayment = async (req: Request, res: Response) => {
-  if (!req.user || req.user.role !== "admin") throw new UnauthorizedError("Access denied");
+  if (!req.user || req.user.role !== "admin")
+    throw new UnauthorizedError("Access denied");
 
   const { id } = req.params;
   const { status, rejected_reason } = req.body;
@@ -58,116 +104,189 @@ export const updatePayment = async (req: Request, res: Response) => {
     throw new BadRequest("Status must be either approved or rejected");
   }
 
-  const payment = await PaymentModel.findById(id).populate("plan_id");
-  if (!payment) throw new NotFound("Payment not found");
+  const [paymentResult] = await db
+    .select({
+      payment: payments,
+      plan: plans,
+    })
+    .from(payments)
+    .leftJoin(plans, eq(payments.planId, plans.id))
+    .where(eq(payments.id, Number(id)));
 
-  // تحديث حالة الدفع
-  payment.status = status;
+  if (!paymentResult) throw new NotFound("Payment not found");
+
+  const payment = paymentResult.payment;
+  const plan = paymentResult.plan;
+
+  // Update payment status
   if (status === "rejected") {
-    payment.rejected_reason = rejected_reason || "No reason provided";
-    await payment.save();
-    return SuccessResponse(res, { message: "Payment rejected", payment });
+    await db
+      .update(payments)
+      .set({
+        status: "rejected",
+        rejectedReason: rejected_reason || "No reason provided",
+      })
+      .where(eq(payments.id, Number(id)));
+
+    const [updatedPayment] = await db
+      .select()
+      .from(payments)
+      .where(eq(payments.id, Number(id)));
+
+    return SuccessResponse(res, {
+      message: "Payment rejected",
+      payment: updatedPayment,
+    });
   }
 
-  // لو approved
-  const plan: any = payment.plan_id;
-  const user = await UserModel.findById(payment.userId);
+  // For approved status
+  const [user] = await db
+    .select()
+    .from(users)
+    .where(eq(users.id, payment.userId));
+
   if (!user) throw new NotFound("User not found");
 
-  // ✅ التحقق من Promo Code
+  // Check Promo Code
   if (payment.code) {
-    const promo = await PromoCodeModel.findOne({ 
-      code: payment.code, 
-      isActive: true,
-      start_date: { $lte: new Date() },
-      end_date: { $gte: new Date() },
-      available_users:{ $gt: 0 }
-    });
+    const now = new Date();
+    const [promo] = await db
+      .select()
+      .from(promoCodes)
+      .where(
+        and(
+          eq(promoCodes.code, payment.code),
+          eq(promoCodes.isActive, true),
+          lte(promoCodes.startDate, now),
+          gte(promoCodes.endDate, now),
+          gt(promoCodes.availableUsers, 0)
+        )
+      );
 
     if (promo) {
-      promo.available_users -= 1;
-      await promo.save();
+      await db
+        .update(promoCodes)
+        .set({ availableUsers: (promo.availableUsers || 0) - 1 })
+        .where(eq(promoCodes.id, promo.id));
 
-      const alreadyUsed = await PromoCodeUserModel.findOne({
-        userId: user._id,
-        codeId: promo._id
-      });
+      const [alreadyUsed] = await db
+        .select()
+        .from(promocodeUsers)
+        .where(
+          and(
+            eq(promocodeUsers.userId, user.id),
+            eq(promocodeUsers.codeId, promo.id)
+          )
+        );
+
       if (!alreadyUsed) {
-        await PromoCodeUserModel.create({
-          userId: user._id,
-          codeId: promo._id
+        await db.insert(promocodeUsers).values({
+          userId: user.id,
+          codeId: promo.id,
         });
       }
     }
   }
 
-  // تحديد عدد الأشهر للإشتراك بناءً على subscriptionType
   let monthsToAdd = 0;
-  const subscriptionType = payment.subscriptionType || "quarterly"; // افتراضي quarterly إذا مش محدد
-  switch(subscriptionType) {
-    case "monthly": monthsToAdd = 1; break;
-    case "quarterly": monthsToAdd = 3; break;
-    case "semi_annually": monthsToAdd = 6; break;
-    case "annually": monthsToAdd = 12; break;
-    default: throw new BadRequest("Invalid subscription type");
+  const subscriptionType = payment.subscriptionType || "quarterly";
+  switch (subscriptionType) {
+    case "monthly":
+      monthsToAdd = 1;
+      break;
+    case "quarterly":
+      monthsToAdd = 3;
+      break;
+    case "semi_annually":
+      monthsToAdd = 6;
+      break;
+    case "annually":
+      monthsToAdd = 12;
+      break;
+    default:
+      throw new BadRequest("Invalid subscription type");
   }
 
-  // التعامل مع الاشتراك
+  // Handle subscription
   if (!user.planId) {
     const startDate = new Date();
     const endDate = new Date();
     endDate.setMonth(startDate.getMonth() + monthsToAdd);
 
-    await SubscriptionModel.create({
-      userId: user._id,
-      planId: plan._id,
-      PaymentId: payment._id,
+    await db.insert(subscriptions).values({
+      userId: user.id,
+      planId: plan!.id,
+      paymentId: payment.id,
       startDate,
       endDate,
       status: "active",
-      websites_created_count: 0,
-      websites_remaining_count: plan.website_limit || 0,
+      websitesCreatedCount: 0,
+      websitesRemainingCount: plan?.websiteLimit || 0,
     });
 
-    user.planId = plan._id;
-    await user.save();
-  } else if (user.planId.toString() === plan._id.toString()) {
-    const subscription = await SubscriptionModel.findOne({
-      userId: user._id,
-      planId: plan._id,
-      status: "active",
-    }).sort({ createdAt: -1 });
+    await db.update(users).set({ planId: plan!.id }).where(eq(users.id, user.id));
+  } else if (user.planId === plan!.id) {
+    const [subscription] = await db
+      .select()
+      .from(subscriptions)
+      .where(
+        and(
+          eq(subscriptions.userId, user.id),
+          eq(subscriptions.planId, plan!.id),
+          eq(subscriptions.status, "active")
+        )
+      )
+      .orderBy(desc(subscriptions.createdAt))
+      .limit(1);
 
     if (!subscription) throw new NotFound("Active subscription not found");
 
-    subscription.endDate.setMonth(subscription.endDate.getMonth() + monthsToAdd);
-    await subscription.save();
+    const newEndDate = new Date(subscription.endDate);
+    newEndDate.setMonth(newEndDate.getMonth() + monthsToAdd);
+
+    await db
+      .update(subscriptions)
+      .set({ endDate: newEndDate })
+      .where(eq(subscriptions.id, subscription.id));
   } else {
-    await SubscriptionModel.updateMany(
-      { userId: user._id, status: "active" },
-      { $set: { status: "expired" } }
-    );
+    // Expire existing subscriptions
+    await db
+      .update(subscriptions)
+      .set({ status: "expired" })
+      .where(
+        and(eq(subscriptions.userId, user.id), eq(subscriptions.status, "active"))
+      );
 
     const startDate = new Date();
     const endDate = new Date();
     endDate.setMonth(startDate.getMonth() + monthsToAdd);
 
-    await SubscriptionModel.create({
-      userId: user._id,
-      planId: plan._id,
-      PaymentId: payment._id,
+    await db.insert(subscriptions).values({
+      userId: user.id,
+      planId: plan!.id,
+      paymentId: payment.id,
       startDate,
       endDate,
       status: "active",
-      websites_created_count: 0,
-      websites_remaining_count: plan.website_limit || 0,
+      websitesCreatedCount: 0,
+      websitesRemainingCount: plan?.websiteLimit || 0,
     });
 
-    user.planId = plan._id;
-    await user.save();
+    await db.update(users).set({ planId: plan!.id }).where(eq(users.id, user.id));
   }
 
-  await payment.save();
-  SuccessResponse(res, { message: "Payment approved successfully", payment });
-};
+  await db
+    .update(payments)
+    .set({ status: "approved" })
+    .where(eq(payments.id, Number(id)));
 
+  const [updatedPayment] = await db
+    .select()
+    .from(payments)
+    .where(eq(payments.id, Number(id)));
+
+  SuccessResponse(res, {
+    message: "Payment approved successfully",
+    payment: updatedPayment,
+  });
+};

@@ -1,14 +1,16 @@
-import { SubscriptionModel } from "../../models/shema/subscriptions";
-import { WebsiteModel } from "../../models/shema/websites";
+import { Request, Response } from "express";
+import { db } from "../../models/connection";
+import { subscriptions } from "../../models/schema/subscriptions";
+import { websites } from "../../models/schema/websites";
+import { templates } from "../../models/schema/templates";
+import { users } from "../../models/schema/auth/User";
+import { eq, and, gte, desc } from "drizzle-orm";
 import { UnauthorizedError } from "../../Errors/index";
 import { BadRequest } from "../../Errors/BadRequest";
 import { NotFound } from "../../Errors/NotFound";
 import { SuccessResponse } from "../../utils/response";
-import { Request, Response } from "express";
 import fs from "fs";
 import path from "path";
-import { TemplateModel } from "../../models/shema/templates";
-import mongoose from "mongoose";
 
 export const createWebsite = async (req: Request, res: Response) => {
   if (!req.user) throw new UnauthorizedError("User not authenticated");
@@ -18,86 +20,143 @@ export const createWebsite = async (req: Request, res: Response) => {
     throw new BadRequest("Please provide all required fields");
   }
 
-  // ✅ تأكد من وجود التيمبلت
-  const template = await TemplateModel.findById(templateId);
+  // Check if template exists
+  const [template] = await db
+    .select()
+    .from(templates)
+    .where(eq(templates.id, Number(templateId)));
+
   if (!template) throw new BadRequest("Template not found");
 
-  // ✅ هات الاشتراك الـ active بس
-  const subscription = await SubscriptionModel.findOne({
-    userId: req.user.id,
-    status: "active",
-    endDate: { $gte: new Date() },
-  }).sort({ createdAt: -1 });
+  // Get active subscription
+  const [subscription] = await db
+    .select()
+    .from(subscriptions)
+    .where(
+      and(
+        eq(subscriptions.userId, Number(req.user.id)),
+        eq(subscriptions.status, "active"),
+        gte(subscriptions.endDate, new Date())
+      )
+    )
+    .orderBy(desc(subscriptions.createdAt))
+    .limit(1);
 
   if (!subscription) {
     throw new BadRequest("You do not have an active subscription");
   }
 
-  // ✅ شيك على عدد المواقع المتاحة
-  if (subscription.websites_remaining_count <= 0) {
+  // Check website limit
+  if ((subscription.websitesRemainingCount || 0) <= 0) {
     throw new BadRequest("You have reached your website creation limit");
   }
 
-  // ✅ اعمل نسخة من التيمبلت
+  // Create copy of template
   const websiteId = new Date().getTime();
-  const websitesDir = path.join(__dirname, "../../uploads/websites", String(websiteId));
+  const websitesDir = path.join(
+    __dirname,
+    "../../uploads/websites",
+    String(websiteId)
+  );
   if (!fs.existsSync(websitesDir)) {
     fs.mkdirSync(websitesDir, { recursive: true });
   }
 
-  // ✨ هات اسم الملف من اللينك
-  const templateFileName = path.basename(template.template_file_path); // ex: file.zip
-  const templateSourcePath = path.join(__dirname, "../../uploads/templates", templateFileName);
+  // Get filename from link
+  const templateFileName = path.basename(template.templateFilePath);
+  const templateSourcePath = path.join(
+    __dirname,
+    "../../uploads/templates",
+    templateFileName
+  );
   const copiedTemplatePath = path.join(websitesDir, templateFileName);
 
-  // ✨ انسخ الملف
+  // Copy file
   fs.copyFileSync(templateSourcePath, copiedTemplatePath);
 
-  // ✨ ابني اللينك الجديد للمشروع
+  // Build new project link
   const projectLink = `${req.protocol}://${req.get("host")}/uploads/websites/${websiteId}/${templateFileName}`;
 
-  // ✅ أنشئ الويبسايت الجديد
-  const newWebsite = await WebsiteModel.create({
-    userId: req.user.id,
-    templateId,
-    activitiesId,
-    demo_link,
-    project_path: projectLink, // هنا اللينك مش المسار الداخلي
-    start_date: new Date(),
-    end_date: subscription.endDate,
-    status: "pending_admin_review",
-  });
+  // Create new website
+  const [result] = await db
+    .insert(websites)
+    .values({
+      userId: Number(req.user.id),
+      templateId: Number(templateId),
+      activityId: Number(activitiesId),
+      demoLink: demo_link,
+      projectPath: projectLink,
+      startDate: new Date(),
+      endDate: subscription.endDate,
+      status: "pending_admin_review",
+    })
+    .$returningId();
 
-  // ✅ عدّل الاشتراك
-  subscription.websites_created_count += 1;
-  subscription.websites_remaining_count -= 1;
-  await subscription.save();
+  const [newWebsite] = await db
+    .select()
+    .from(websites)
+    .where(eq(websites.id, result.id));
+
+  // Update subscription
+  await db
+    .update(subscriptions)
+    .set({
+      websitesCreatedCount: (subscription.websitesCreatedCount || 0) + 1,
+      websitesRemainingCount: (subscription.websitesRemainingCount || 0) - 1,
+    })
+    .where(eq(subscriptions.id, subscription.id));
 
   SuccessResponse(res, {
     message: "Website created successfully",
     newWebsite,
     subscriptionStatus: {
-      websites_created_count: subscription.websites_created_count,
-      websites_remaining_count: subscription.websites_remaining_count,
+      websites_created_count: (subscription.websitesCreatedCount || 0) + 1,
+      websites_remaining_count: (subscription.websitesRemainingCount || 0) - 1,
     },
   });
 };
 
-
 export const getAllWebsites = async (req: Request, res: Response) => {
   if (!req.user) throw new UnauthorizedError("User not authenticated");
-  const userId =req.user.id;
-  const data = await WebsiteModel.find({userId });
-  if (!data) throw new NotFound("No website found");
+
+  const userId = req.user.id;
+
+  const data = await db
+    .select()
+    .from(websites)
+    .where(eq(websites.userId, Number(userId)));
+
+  if (!data || data.length === 0) throw new NotFound("No website found");
+
   SuccessResponse(res, { message: "All website fetched successfully", data });
 };
 
 export const getWebsiteById = async (req: Request, res: Response) => {
   if (!req.user) throw new UnauthorizedError("User not authenticated");
+
   const { id } = req.params;
   if (!id) throw new BadRequest("Please provide website id");
-  const data = await WebsiteModel.findById(id).populate("userId", "name email");
-  if (!data) throw new NotFound("Website not found");
+
+  const [result] = await db
+    .select({
+      website: websites,
+      user: {
+        id: users.id,
+        name: users.name,
+        email: users.email,
+      },
+    })
+    .from(websites)
+    .leftJoin(users, eq(websites.userId, users.id))
+    .where(eq(websites.id, Number(id)));
+
+  if (!result) throw new NotFound("Website not found");
+
+  const data = {
+    ...result.website,
+    userId: result.user,
+  };
+
   SuccessResponse(res, { message: "Website fetched successfully", data });
 };
 
@@ -107,96 +166,130 @@ export const updateWebsite = async (req: Request, res: Response) => {
   const { websiteId } = req.params;
   const { demo_link, status, rejected_reason } = req.body;
 
-  // ✅ تحقق من الـ ID
-  if (!mongoose.Types.ObjectId.isValid(websiteId)) {
+  // Validate ID
+  if (!websiteId || isNaN(Number(websiteId))) {
     throw new BadRequest("Invalid website ID format");
   }
 
-  // ✅ هات الويبسايت الخاص باليوزر
-  const website = await WebsiteModel.findOne({
-    _id: websiteId,
-    userId: req.user.id,
-  });
+  // Get user's website
+  const [website] = await db
+    .select()
+    .from(websites)
+    .where(
+      and(
+        eq(websites.id, Number(websiteId)),
+        eq(websites.userId, Number(req.user.id))
+      )
+    );
 
   if (!website) {
     throw new NotFound("Website not found or you do not own it");
   }
 
-  // ✅ تحديث الحقول الأساسية
-  if (demo_link) website.demo_link = demo_link;
-  if (status) website.status = status;
-  if (rejected_reason) website.rejected_reason = rejected_reason;
+  // Update fields
+  const updateData: Partial<typeof websites.$inferInsert> = {};
+  if (demo_link) updateData.demoLink = demo_link;
+  if (status) updateData.status = status;
+  if (rejected_reason) updateData.rejectedReason = rejected_reason;
 
-  // ✅ لو جالك ملف جديد (project zip مثلًا)
+  // Handle file upload
   if (req.file) {
     const websiteFolder = path.join(
       __dirname,
       "../../uploads/websites",
-      String(website._id)
+      String(website.id)
     );
 
     if (!fs.existsSync(websiteFolder)) {
       fs.mkdirSync(websiteFolder, { recursive: true });
     }
 
-    // ✨ خزن الملف الجديد جوه فولدر الويبسايت
     const fileName = Date.now() + path.extname(req.file.originalname);
     const newPath = path.join(websiteFolder, fileName);
 
     fs.writeFileSync(newPath, req.file.buffer);
 
-    // ✨ اعمل لينك عام جديد
-    const projectLink = `${req.protocol}://${req.get("host")}/uploads/websites/${website._id}/${fileName}`;
+    const projectLink = `${req.protocol}://${req.get("host")}/uploads/websites/${website.id}/${fileName}`;
 
-    // ✨ حدث الـ project_path
-    website.project_path = projectLink;
+    updateData.projectPath = projectLink;
   }
 
-  await website.save();
+  await db
+    .update(websites)
+    .set(updateData)
+    .where(eq(websites.id, Number(websiteId)));
+
+  const [updatedWebsite] = await db
+    .select()
+    .from(websites)
+    .where(eq(websites.id, Number(websiteId)));
 
   SuccessResponse(res, {
     message: "Website updated successfully",
-    website,
+    website: updatedWebsite,
   });
 };
-
 
 export const deleteWebsite = async (req: Request, res: Response) => {
   if (!req.user) throw new UnauthorizedError("User not authenticated");
 
   const { websiteId } = req.params;
 
-const website = await WebsiteModel.findOne({
-  _id: new mongoose.Types.ObjectId(websiteId),
-  userId: new mongoose.Types.ObjectId(req.user.id),
-});  if (!website) {
+  const [website] = await db
+    .select()
+    .from(websites)
+    .where(
+      and(
+        eq(websites.id, Number(websiteId)),
+        eq(websites.userId, Number(req.user.id))
+      )
+    );
+
+  if (!website) {
     throw new BadRequest("Website not found or you do not own it");
   }
 
-  if (fs.existsSync(website.project_path)) {
+  // Delete files
+  if (fs.existsSync(website.projectPath)) {
     try {
-      fs.rmSync(website.project_path, { recursive: true, force: true }); 
+      fs.rmSync(website.projectPath, { recursive: true, force: true });
     } catch (err) {
       console.error("Error deleting website files:", err);
     }
   }
 
-  await WebsiteModel.deleteOne({ _id: website._id });
+  await db.delete(websites).where(eq(websites.id, website.id));
 
-  const subscription = await SubscriptionModel.findOne({ userId: req.user.id })
-    .sort({ createdAt: -1 });
+  // Update subscription
+  const [subscription] = await db
+    .select()
+    .from(subscriptions)
+    .where(eq(subscriptions.userId, Number(req.user.id)))
+    .orderBy(desc(subscriptions.createdAt))
+    .limit(1);
 
   if (subscription) {
-    subscription.websites_created_count -= 1;
-    subscription.websites_remaining_count += 1;
-    await subscription.save();
+    await db
+      .update(subscriptions)
+      .set({
+        websitesCreatedCount: Math.max(
+          0,
+          (subscription.websitesCreatedCount || 0) - 1
+        ),
+        websitesRemainingCount: (subscription.websitesRemainingCount || 0) + 1,
+      })
+      .where(eq(subscriptions.id, subscription.id));
   }
 
   SuccessResponse(res, {
     message: "Website deleted successfully, limit restored",
     subscriptionStatus: {
-      websites_created_count: subscription?.websites_created_count,
-      websites_remaining_count: subscription?.websites_remaining_count,
+      websites_created_count: subscription
+        ? Math.max(0, (subscription.websitesCreatedCount || 0) - 1)
+        : 0,
+      websites_remaining_count: subscription
+        ? (subscription.websitesRemainingCount || 0) + 1
+        : 0,
     },
   });
 };

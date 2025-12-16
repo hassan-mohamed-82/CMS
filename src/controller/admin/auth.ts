@@ -1,7 +1,8 @@
 import { Request, Response } from "express";
-import { AdminModel } from "../../models/shema/auth/Admin";
+import { db } from "../../models/connection";
+import { admins } from "../../models/schema/auth/Admin";
+import { eq } from "drizzle-orm";
 import bcrypt from "bcrypt";
-import jwt from "jsonwebtoken";
 import { UnauthorizedError } from "../../Errors";
 import { SuccessResponse } from "../../utils/response";
 import { generateToken } from "../../utils/auth";
@@ -13,7 +14,12 @@ export const login = async (req: Request, res: Response) => {
     throw new UnauthorizedError("Email and password are required");
   }
 
-  const admin = await AdminModel.findOne({ email });
+  const [admin] = await db
+    .select()
+    .from(admins)
+    .where(eq(admins.email, email))
+    .limit(1);
+
   if (!admin) {
     throw new UnauthorizedError("Invalid email or password");
   }
@@ -30,5 +36,4 @@ export const login = async (req: Request, res: Response) => {
   });
 
   SuccessResponse(res, { message: "login Successful", token: token }, 200);
-
 };

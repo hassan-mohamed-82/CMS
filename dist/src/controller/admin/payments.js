@@ -1,24 +1,45 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.updatePayment = exports.getPaymentByIdAdmin = exports.getAllPaymentsAdmin = void 0;
+const connection_1 = require("../../models/connection");
+const payments_1 = require("../../models/schema/payments");
+const User_1 = require("../../models/schema/auth/User");
+const plans_1 = require("../../models/schema/plans");
+const payment_methods_1 = require("../../models/schema/payment_methods");
+const subscriptions_1 = require("../../models/schema/subscriptions");
+const promo_code_1 = require("../../models/schema/promo_code");
+const promocode_users_1 = require("../../models/schema/promocode_users");
+const drizzle_orm_1 = require("drizzle-orm");
 const BadRequest_1 = require("../../Errors/BadRequest");
 const NotFound_1 = require("../../Errors/NotFound");
 const unauthorizedError_1 = require("../../Errors/unauthorizedError");
 const response_1 = require("../../utils/response");
-const subscriptions_1 = require("../../models/shema/subscriptions");
-const payments_1 = require("../../models/shema/payments");
-const User_1 = require("../../models/shema/auth/User");
-const promo_code_1 = require("../../models/shema/promo_code");
-const promocode_users_1 = require("../../models/shema/promocode_users");
 const getAllPaymentsAdmin = async (req, res) => {
     if (!req.user || req.user.role !== "admin")
         throw new unauthorizedError_1.UnauthorizedError("Access denied");
-    const payments = await payments_1.PaymentModel.find()
-        .populate("userId", "name email") // هات اسم و ايميل اليوزر بس
-        .populate("plan_id") // هات تفاصيل البلان
-        .populate("paymentmethod_id"); // هات تفاصيل الميثود
-    const pending = payments.filter(p => p.status === "pending");
-    const history = payments.filter(p => ["approved", "rejected"].includes(p.status));
+    const allPayments = await connection_1.db
+        .select({
+        payment: payments_1.payments,
+        user: {
+            id: User_1.users.id,
+            name: User_1.users.name,
+            email: User_1.users.email,
+        },
+        plan: plans_1.plans,
+        paymentMethod: payment_methods_1.paymentMethods,
+    })
+        .from(payments_1.payments)
+        .leftJoin(User_1.users, (0, drizzle_orm_1.eq)(payments_1.payments.userId, User_1.users.id))
+        .leftJoin(plans_1.plans, (0, drizzle_orm_1.eq)(payments_1.payments.planId, plans_1.plans.id))
+        .leftJoin(payment_methods_1.paymentMethods, (0, drizzle_orm_1.eq)(payments_1.payments.paymentMethodId, payment_methods_1.paymentMethods.id));
+    const formattedPayments = allPayments.map((p) => ({
+        ...p.payment,
+        userId: p.user,
+        plan_id: p.plan,
+        paymentmethod_id: p.paymentMethod,
+    }));
+    const pending = formattedPayments.filter((p) => p.status === "pending");
+    const history = formattedPayments.filter((p) => ["approved", "rejected"].includes(p.status || ""));
     (0, response_1.SuccessResponse)(res, {
         message: "All payments fetched successfully (admin)",
         payments: {
@@ -34,13 +55,34 @@ const getPaymentByIdAdmin = async (req, res) => {
     const { id } = req.params;
     if (!id)
         throw new BadRequest_1.BadRequest("Please provide payment id");
-    const payment = await payments_1.PaymentModel.findById(id)
-        .populate("userId", "name email")
-        .populate("plan_id")
-        .populate("paymentmethod_id");
-    if (!payment)
+    const [result] = await connection_1.db
+        .select({
+        payment: payments_1.payments,
+        user: {
+            id: User_1.users.id,
+            name: User_1.users.name,
+            email: User_1.users.email,
+        },
+        plan: plans_1.plans,
+        paymentMethod: payment_methods_1.paymentMethods,
+    })
+        .from(payments_1.payments)
+        .leftJoin(User_1.users, (0, drizzle_orm_1.eq)(payments_1.payments.userId, User_1.users.id))
+        .leftJoin(plans_1.plans, (0, drizzle_orm_1.eq)(payments_1.payments.planId, plans_1.plans.id))
+        .leftJoin(payment_methods_1.paymentMethods, (0, drizzle_orm_1.eq)(payments_1.payments.paymentMethodId, payment_methods_1.paymentMethods.id))
+        .where((0, drizzle_orm_1.eq)(payments_1.payments.id, Number(id)));
+    if (!result)
         throw new NotFound_1.NotFound("Payment not found");
-    (0, response_1.SuccessResponse)(res, { message: "Payment fetched successfully (admin)", payment });
+    const payment = {
+        ...result.payment,
+        userId: result.user,
+        plan_id: result.plan,
+        paymentmethod_id: result.paymentMethod,
+    };
+    (0, response_1.SuccessResponse)(res, {
+        message: "Payment fetched successfully (admin)",
+        payment,
+    });
 };
 exports.getPaymentByIdAdmin = getPaymentByIdAdmin;
 const updatePayment = async (req, res) => {
@@ -51,48 +93,69 @@ const updatePayment = async (req, res) => {
     if (!["approved", "rejected"].includes(status)) {
         throw new BadRequest_1.BadRequest("Status must be either approved or rejected");
     }
-    const payment = await payments_1.PaymentModel.findById(id).populate("plan_id");
-    if (!payment)
+    const [paymentResult] = await connection_1.db
+        .select({
+        payment: payments_1.payments,
+        plan: plans_1.plans,
+    })
+        .from(payments_1.payments)
+        .leftJoin(plans_1.plans, (0, drizzle_orm_1.eq)(payments_1.payments.planId, plans_1.plans.id))
+        .where((0, drizzle_orm_1.eq)(payments_1.payments.id, Number(id)));
+    if (!paymentResult)
         throw new NotFound_1.NotFound("Payment not found");
-    // تحديث حالة الدفع
-    payment.status = status;
+    const payment = paymentResult.payment;
+    const plan = paymentResult.plan;
+    // Update payment status
     if (status === "rejected") {
-        payment.rejected_reason = rejected_reason || "No reason provided";
-        await payment.save();
-        return (0, response_1.SuccessResponse)(res, { message: "Payment rejected", payment });
+        await connection_1.db
+            .update(payments_1.payments)
+            .set({
+            status: "rejected",
+            rejectedReason: rejected_reason || "No reason provided",
+        })
+            .where((0, drizzle_orm_1.eq)(payments_1.payments.id, Number(id)));
+        const [updatedPayment] = await connection_1.db
+            .select()
+            .from(payments_1.payments)
+            .where((0, drizzle_orm_1.eq)(payments_1.payments.id, Number(id)));
+        return (0, response_1.SuccessResponse)(res, {
+            message: "Payment rejected",
+            payment: updatedPayment,
+        });
     }
-    // لو approved
-    const plan = payment.plan_id;
-    const user = await User_1.UserModel.findById(payment.userId);
+    // For approved status
+    const [user] = await connection_1.db
+        .select()
+        .from(User_1.users)
+        .where((0, drizzle_orm_1.eq)(User_1.users.id, payment.userId));
     if (!user)
         throw new NotFound_1.NotFound("User not found");
-    // ✅ التحقق من Promo Code
+    // Check Promo Code
     if (payment.code) {
-        const promo = await promo_code_1.PromoCodeModel.findOne({
-            code: payment.code,
-            isActive: true,
-            start_date: { $lte: new Date() },
-            end_date: { $gte: new Date() },
-            available_users: { $gt: 0 }
-        });
+        const now = new Date();
+        const [promo] = await connection_1.db
+            .select()
+            .from(promo_code_1.promoCodes)
+            .where((0, drizzle_orm_1.and)((0, drizzle_orm_1.eq)(promo_code_1.promoCodes.code, payment.code), (0, drizzle_orm_1.eq)(promo_code_1.promoCodes.isActive, true), (0, drizzle_orm_1.lte)(promo_code_1.promoCodes.startDate, now), (0, drizzle_orm_1.gte)(promo_code_1.promoCodes.endDate, now), (0, drizzle_orm_1.gt)(promo_code_1.promoCodes.availableUsers, 0)));
         if (promo) {
-            promo.available_users -= 1;
-            await promo.save();
-            const alreadyUsed = await promocode_users_1.PromoCodeUserModel.findOne({
-                userId: user._id,
-                codeId: promo._id
-            });
+            await connection_1.db
+                .update(promo_code_1.promoCodes)
+                .set({ availableUsers: (promo.availableUsers || 0) - 1 })
+                .where((0, drizzle_orm_1.eq)(promo_code_1.promoCodes.id, promo.id));
+            const [alreadyUsed] = await connection_1.db
+                .select()
+                .from(promocode_users_1.promocodeUsers)
+                .where((0, drizzle_orm_1.and)((0, drizzle_orm_1.eq)(promocode_users_1.promocodeUsers.userId, user.id), (0, drizzle_orm_1.eq)(promocode_users_1.promocodeUsers.codeId, promo.id)));
             if (!alreadyUsed) {
-                await promocode_users_1.PromoCodeUserModel.create({
-                    userId: user._id,
-                    codeId: promo._id
+                await connection_1.db.insert(promocode_users_1.promocodeUsers).values({
+                    userId: user.id,
+                    codeId: promo.id,
                 });
             }
         }
     }
-    // تحديد عدد الأشهر للإشتراك بناءً على subscriptionType
     let monthsToAdd = 0;
-    const subscriptionType = payment.subscriptionType || "quarterly"; // افتراضي quarterly إذا مش محدد
+    const subscriptionType = payment.subscriptionType || "quarterly";
     switch (subscriptionType) {
         case "monthly":
             monthsToAdd = 1;
@@ -106,56 +169,74 @@ const updatePayment = async (req, res) => {
         case "annually":
             monthsToAdd = 12;
             break;
-        default: throw new BadRequest_1.BadRequest("Invalid subscription type");
+        default:
+            throw new BadRequest_1.BadRequest("Invalid subscription type");
     }
-    // التعامل مع الاشتراك
+    // Handle subscription
     if (!user.planId) {
         const startDate = new Date();
         const endDate = new Date();
         endDate.setMonth(startDate.getMonth() + monthsToAdd);
-        await subscriptions_1.SubscriptionModel.create({
-            userId: user._id,
-            planId: plan._id,
-            PaymentId: payment._id,
+        await connection_1.db.insert(subscriptions_1.subscriptions).values({
+            userId: user.id,
+            planId: plan.id,
+            paymentId: payment.id,
             startDate,
             endDate,
             status: "active",
-            websites_created_count: 0,
-            websites_remaining_count: plan.website_limit || 0,
+            websitesCreatedCount: 0,
+            websitesRemainingCount: plan?.websiteLimit || 0,
         });
-        user.planId = plan._id;
-        await user.save();
+        await connection_1.db.update(User_1.users).set({ planId: plan.id }).where((0, drizzle_orm_1.eq)(User_1.users.id, user.id));
     }
-    else if (user.planId.toString() === plan._id.toString()) {
-        const subscription = await subscriptions_1.SubscriptionModel.findOne({
-            userId: user._id,
-            planId: plan._id,
-            status: "active",
-        }).sort({ createdAt: -1 });
+    else if (user.planId === plan.id) {
+        const [subscription] = await connection_1.db
+            .select()
+            .from(subscriptions_1.subscriptions)
+            .where((0, drizzle_orm_1.and)((0, drizzle_orm_1.eq)(subscriptions_1.subscriptions.userId, user.id), (0, drizzle_orm_1.eq)(subscriptions_1.subscriptions.planId, plan.id), (0, drizzle_orm_1.eq)(subscriptions_1.subscriptions.status, "active")))
+            .orderBy((0, drizzle_orm_1.desc)(subscriptions_1.subscriptions.createdAt))
+            .limit(1);
         if (!subscription)
             throw new NotFound_1.NotFound("Active subscription not found");
-        subscription.endDate.setMonth(subscription.endDate.getMonth() + monthsToAdd);
-        await subscription.save();
+        const newEndDate = new Date(subscription.endDate);
+        newEndDate.setMonth(newEndDate.getMonth() + monthsToAdd);
+        await connection_1.db
+            .update(subscriptions_1.subscriptions)
+            .set({ endDate: newEndDate })
+            .where((0, drizzle_orm_1.eq)(subscriptions_1.subscriptions.id, subscription.id));
     }
     else {
-        await subscriptions_1.SubscriptionModel.updateMany({ userId: user._id, status: "active" }, { $set: { status: "expired" } });
+        // Expire existing subscriptions
+        await connection_1.db
+            .update(subscriptions_1.subscriptions)
+            .set({ status: "expired" })
+            .where((0, drizzle_orm_1.and)((0, drizzle_orm_1.eq)(subscriptions_1.subscriptions.userId, user.id), (0, drizzle_orm_1.eq)(subscriptions_1.subscriptions.status, "active")));
         const startDate = new Date();
         const endDate = new Date();
         endDate.setMonth(startDate.getMonth() + monthsToAdd);
-        await subscriptions_1.SubscriptionModel.create({
-            userId: user._id,
-            planId: plan._id,
-            PaymentId: payment._id,
+        await connection_1.db.insert(subscriptions_1.subscriptions).values({
+            userId: user.id,
+            planId: plan.id,
+            paymentId: payment.id,
             startDate,
             endDate,
             status: "active",
-            websites_created_count: 0,
-            websites_remaining_count: plan.website_limit || 0,
+            websitesCreatedCount: 0,
+            websitesRemainingCount: plan?.websiteLimit || 0,
         });
-        user.planId = plan._id;
-        await user.save();
+        await connection_1.db.update(User_1.users).set({ planId: plan.id }).where((0, drizzle_orm_1.eq)(User_1.users.id, user.id));
     }
-    await payment.save();
-    (0, response_1.SuccessResponse)(res, { message: "Payment approved successfully", payment });
+    await connection_1.db
+        .update(payments_1.payments)
+        .set({ status: "approved" })
+        .where((0, drizzle_orm_1.eq)(payments_1.payments.id, Number(id)));
+    const [updatedPayment] = await connection_1.db
+        .select()
+        .from(payments_1.payments)
+        .where((0, drizzle_orm_1.eq)(payments_1.payments.id, Number(id)));
+    (0, response_1.SuccessResponse)(res, {
+        message: "Payment approved successfully",
+        payment: updatedPayment,
+    });
 };
 exports.updatePayment = updatePayment;

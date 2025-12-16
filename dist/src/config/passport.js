@@ -7,7 +7,9 @@ exports.verifyGoogleToken = void 0;
 const google_auth_library_1 = require("google-auth-library");
 const jsonwebtoken_1 = __importDefault(require("jsonwebtoken"));
 const dotenv_1 = __importDefault(require("dotenv"));
-const User_1 = require("../models/shema/auth/User");
+const connection_1 = require("../models/connection");
+const User_1 = require("../models/schema/auth/User");
+const drizzle_orm_1 = require("drizzle-orm");
 dotenv_1.default.config();
 const client = new google_auth_library_1.OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 const verifyGoogleToken = async (req, res) => {
@@ -24,31 +26,43 @@ const verifyGoogleToken = async (req, res) => {
         const email = payload.email;
         const name = payload.name || "Unknown User";
         const googleId = payload.sub;
-        let user = await User_1.UserModel.findOne({ $or: [{ googleId }, { email }] });
-        if (!user) {
+        // Find user by googleId or email
+        const [existingUser] = await connection_1.db
+            .select()
+            .from(User_1.users)
+            .where((0, drizzle_orm_1.or)((0, drizzle_orm_1.eq)(User_1.users.googleId, googleId), (0, drizzle_orm_1.eq)(User_1.users.email, email)));
+        let userId;
+        if (!existingUser) {
             // ➕ Signup (new user)
-            user = new User_1.UserModel({
+            const [result] = await connection_1.db
+                .insert(User_1.users)
+                .values({
                 googleId,
                 email,
                 name,
                 isVerified: true,
-            });
-            await user.save();
+            })
+                .$returningId();
+            userId = result.id;
         }
         else {
             // 👤 Login (existing user)
-            if (!user.googleId) {
-                user.googleId = googleId;
+            userId = existingUser.id;
+            if (!existingUser.googleId) {
+                await connection_1.db
+                    .update(User_1.users)
+                    .set({ googleId })
+                    .where((0, drizzle_orm_1.eq)(User_1.users.id, existingUser.id));
             }
-            await user.save();
         }
-        // 🔑 Generate JWT مع الدور
-        const authToken = jsonwebtoken_1.default.sign({ id: user._id }, process.env.JWT_SECRET, { expiresIn: "7d" });
+        // 🔑 Generate JWT
+        const authToken = jsonwebtoken_1.default.sign({ id: userId }, process.env.JWT_SECRET, { expiresIn: "7d" });
+        const [user] = await connection_1.db.select().from(User_1.users).where((0, drizzle_orm_1.eq)(User_1.users.id, userId));
         return res.json({
             success: true,
             token: authToken,
             user: {
-                id: user._id,
+                id: user.id,
                 name: user.name,
                 email: user.email,
             },

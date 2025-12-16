@@ -3,7 +3,9 @@ import { Request, Response } from "express";
 import { OAuth2Client } from "google-auth-library";
 import jwt from "jsonwebtoken";
 import dotenv from "dotenv";
-import { UserModel } from "../models/shema/auth/User";
+import { db } from "../models/connection";
+import { users } from "../models/schema/auth/User";
+import { eq, or } from "drizzle-orm";
 
 dotenv.config();
 
@@ -27,38 +29,53 @@ export const verifyGoogleToken = async (req: Request, res: Response) => {
     const name = payload.name || "Unknown User";
     const googleId = payload.sub;
 
-    let user = await UserModel.findOne({ $or: [{ googleId }, { email }] });
+    // Find user by googleId or email
+    const [existingUser] = await db
+      .select()
+      .from(users)
+      .where(or(eq(users.googleId, googleId), eq(users.email, email)));
 
-    if (!user) {
+    let userId: number;
+
+    if (!existingUser) {
       // ➕ Signup (new user)
-      user = new UserModel({
-        googleId,
-        email,
-        name,
-        isVerified: true,
-      });
-      await user.save();
+      const [result] = await db
+        .insert(users)
+        .values({
+          googleId,
+          email,
+          name,
+          isVerified: true,
+        })
+        .$returningId();
+
+      userId = result.id;
     } else {
       // 👤 Login (existing user)
-      if (!user.googleId) {
-        user.googleId = googleId;
+      userId = existingUser.id;
+
+      if (!existingUser.googleId) {
+        await db
+          .update(users)
+          .set({ googleId })
+          .where(eq(users.id, existingUser.id));
       }
-     
-      await user.save();
     }
 
-    // 🔑 Generate JWT مع الدور
+    // 🔑 Generate JWT
     const authToken = jwt.sign(
-      { id: user._id }, 
-      process.env.JWT_SECRET!, 
+      { id: userId },
+      process.env.JWT_SECRET!,
       { expiresIn: "7d" }
     );
+
+    const [user] = await db.select().from(users).where(eq(users.id, userId));
 
     return res.json({
       success: true,
       token: authToken,
       user: {
-        id: user._id,
+        id: user.id,
         name: user.name,
         email: user.email,
       },
