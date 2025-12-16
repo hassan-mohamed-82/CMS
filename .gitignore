@@ -1,4 +1,19 @@
+# Dependencies
 node_modules
+
+# Environment
 .env 
+
+# Uploads
 src/uploads
 dist/src/uploads
+
+
+# Test coverage
+coverage
+
+# Test tokens (generated during testing)
+token.txt
+admin_token.txt
+test/token.txt
+test/admin_token.txt
